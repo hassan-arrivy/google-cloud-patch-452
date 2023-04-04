@@ -2,7 +2,7 @@
 
 Patch provided by: https://github.com/NoCommandLine/dev_appserver-python3-windows/tree/main
 
-Don't use the above patch because that doesn't support reusable virutal envs
+**Don't use the above patch because that doesn't support reusable virutal envs**
 
 Replace these files:
 
