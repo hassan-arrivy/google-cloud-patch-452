@@ -55,13 +55,12 @@ _RECREATE_MODERN_INSTANCE_FACTORY_CONFIG_CHANGES = frozenset([
 
 _MODERN_REQUEST_ID_HEADER_NAME = 'X-Appengine-Api-Ticket'
 
-import sys
 mswindows = (sys.platform == "win32")
 # Added the correct path to pip & python executables on Windows which is via 'Scripts' folder and not 'bin' folder
 # Also changed the default entrypoint to use waitress-serve
 if mswindows:
   executables_folder = 'Scripts'
-  _MODERN_DEFAULT_ENTRYPOINT = 'waitress-serve --listen=*:${PORT} main:app'
+  _MODERN_DEFAULT_ENTRYPOINT = 'waitress-serve --listen=*:7001 main:app'
 else:
   executables_folder = 'bin'
 
@@ -247,10 +246,6 @@ class PythonRuntimeInstanceFactory(instance.InstanceFactory,
   @property
   def _entrypoint(self):
     """Returns the entrypoint as is in module configuration."""
-    # If app.yaml contains an entrypoint, dev_appserver.py prepends it with 'exec'
-    # However, trying to run 'exec' via subprocess.Popen on Windows leads to the error - 'exec' is not recognized as an internal or external command
-    # So, if we're on Windows, we'll strip the 'exec' from entrypoint and just run the original string supplied by the user based on the assumption
-    # that the string starts with an actual executable program which will be in the Scripts folder
     if (mswindows and self._module_configuration.entrypoint):
       import re
       return re.sub('^exec[\s]+' , '', self._module_configuration.entrypoint)
@@ -279,25 +274,24 @@ class PythonRuntimeInstanceFactory(instance.InstanceFactory,
       # Copy requirements.txt into a temporary file. It will be destroyed once
       # the life of self._requirements_file ends. It is created in a directory
       # different from venv_dir so that venv_dir starts clean.
-      with tempfile.NamedTemporaryFile() as requirements_file:
-        # Make a copy of user requirements.txt, the copy is safe to modify.
-        if os.path.exists(self._OrigRequirementsFile):
-          with open(self._OrigRequirementsFile, 'rb') as orig_f:
-            requirements_file.write(orig_f.read())
-
-        # Similar to production, append gunicorn to requirements.txt
-        # as default entrypoint needs it.
-        requirements_file.write(six.b('\ngunicorn'))
-
-        # flushing it because _SetupVirtualenv uses it in a separate process.
-        requirements_file.flush()
-        # For windows, pass self._OrigRequirementsFile because in Windows, the temporary file created as requirements_file is no longer accessible
-        if (mswindows):
-          self.venv_env_vars = self._SetupVirtualenv(
+      if (mswindows):
+        self.venv_env_vars = self._SetupVirtualenv(
             self._venv_dir, self._OrigRequirementsFile)
-        else:
+      else:
+        with tempfile.NamedTemporaryFile() as requirements_file:
+          # Make a copy of user requirements.txt, the copy is safe to modify.
+          if os.path.exists(self._OrigRequirementsFile):
+            with open(self._OrigRequirementsFile, 'rb') as orig_f:
+              requirements_file.write(orig_f.read())
+
+          # Similar to production, append gunicorn to requirements.txt
+          # as default entrypoint needs it.
+          requirements_file.write(six.b('\ngunicorn'))
+
+          # flushing it because _SetupVirtualenv uses it in a separate process.
+          requirements_file.flush()
           self.venv_env_vars = self._SetupVirtualenv(
-            self._venv_dir, requirements_file.name)
+              self._venv_dir, requirements_file.name)
 
   def configuration_changed(self, config_changes):
     """Called when the configuration of the module has changed.
@@ -365,13 +359,16 @@ class PythonRuntimeInstanceFactory(instance.InstanceFactory,
       python_path = os.path.join(venv_dir, executables_folder, 'python')
       pip_env = os.environ.copy()
       pip_env.update(
-          {
-              'VIRTUAL_ENV': venv_dir,
-              'PATH': (str(os.pathsep)).join(
-                  [os.path.join(venv_dir, executables_folder), os.environ['PATH']]), # bin is replaced with executables_folder
-              'PIP_USER': 'false'
-          }
+        {
+          'VIRTUAL_ENV': venv_dir,
+          'PATH': (str(os.pathsep)).join(
+            [os.path.join(venv_dir, executables_folder), os.environ['PATH']]),
+          'PIP_USER': 'false'
+        }
       )
+
+      if self._module_configuration.build_env_variables:
+        pip_env.update(self._module_configuration.build_env_variables)
 
       pip_requirement = 'pip'
       if self._IsPythonExecutableBefore36():
@@ -379,28 +376,14 @@ class PythonRuntimeInstanceFactory(instance.InstanceFactory,
         # as per https://pip.pypa.io/en/stable/news/
         pip_requirement = 'pip<21'
 
-      # NOTE_PIP_USER
-      # Running pip install on Windows gives the error: [WinError 5] Access is denied:   Consider using the `--user` option or check the permissions.
-      # 
-      # If you then use the --user option, you get another error: Can not perform a '--user' install. User site-packages are not visible in this virtualenv.
-      # The solution to this second problem is to set include-system-site-packages to true when creating the virtual env
-      #
-      # Setting the environment var 'PIP_USER = False' solves the above two problems (source - https://github.com/gitpod-io/gitpod/issues/1997#issuecomment-708480259)
-      # Note that we used 'false' which is a string instead of False the boolean value because all environment variables and values have to be string
       if mswindows:
-          # Just running 'pip install --upgrade pip' gives an error so instead we're running
-          # 'python -m pip install --upgrade pip' and 'python' is located in our virtual env
-          pip_cmds = [[python_path, '-m', 'pip', 'install', '--upgrade', pip_requirement],
-                      [pip_path, 'install',  '-r', requirements_file_name],
-                      [pip_path, 'install',  'waitress']]
-          
+        pip_cmds = [[python_path, '-m', 'pip', 'install', '--upgrade', pip_requirement],
+                    [pip_path, 'install',  '-r', requirements_file_name],
+                    [pip_path, 'install',  'waitress']]
       else:
         pip_cmds = [[pip_path, 'install', '--upgrade', pip_requirement],
-                      [pip_path, 'install', '-r', requirements_file_name]]
-          
-##      for pip_cmd in [[pip_path, 'install', '--upgrade', pip_requirement],
-##                      [pip_path, 'install', '-r', requirements_file_name]]:
-      
+                    [pip_path, 'install', '-r', requirements_file_name]]
+
       for pip_cmd in pip_cmds:
         cmd_str = ' '.join(pip_cmd)
         logging.info('Running %s', cmd_str)
@@ -432,14 +415,9 @@ class PythonRuntimeInstanceFactory(instance.InstanceFactory,
 
     # These env vars are used in subprocess to have the same effect as running
     # `source ${venv_dir}/bin/activate`
-    # added SYSTEM ROOT to the env to handle the error
-    # Fatal Python error: _Py_HashRandomization_Init: failed to get random numbers to initialize Python
-    # Python runtime state: preinitialized
-    python_interpreter_path = self._GetPythonInterpreterPath()
     return {
         'VIRTUAL_ENV': venv_dir,
         'SYSTEMROOT': os.environ["SYSTEMROOT"],
-        # 'PATH': ':'.join( use os.pathsep to get the right path component separator for each OS i.e. ':', ';'
         'PATH': (str(os.pathsep)).join(
             [os.path.join(venv_dir, executables_folder), os.environ['PATH']])
     }
